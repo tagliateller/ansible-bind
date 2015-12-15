@@ -1,0 +1,87 @@
+---
+
+# Provision virtual machine example
+
+- hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    azure_image: OpenLogic:CentOS:7.1:7.1.20150731
+    azure_location: eastus
+    azure_prefix: bind 
+ 
+  vars_files:
+    - secrets.yml
+
+  tasks:
+
+    - name: "erzeuge group"
+      command: azure group create {{ azure_prefix }}-group -l {{ azure_location }}
+
+    - name: "erzeuge master"
+      command: azure vm create --nic-name {{ azure_prefix }}-nic --public-ip-name {{ azure_prefix }}-pip --image-urn {{ azure_image }} --admin-username azureuser --ssh-publickey-file ~/azure-key-pair.pub --location {{ azure_location }} --vnet-name {{ azure_prefix }}-vnet --vnet-address-prefix 10.0.0.0/24 --vnet-subnet-name {{ azure_prefix }}-subnet --vnet-subnet-address-prefix 10.0.0.0/27 --public-ip-domain-name {{ azure_prefix }}-master {{ azure_prefix }}-group {{ azure_prefix }}-master linux    
+
+    - name: "add host to group"
+      add_host: > 
+        name=bind-master
+        ansible_ssh_host=bind-master.eastus.cloudapp.azure.com
+        ansible_ssh_port=22
+        ansible_ssh_user=azureuser
+        ansible_ssh_private_key_file=/home/ec2-user/azure-key-pair
+
+- hosts: bind-master
+  remote_user: azureuser
+  vars:
+    bind_config_basepath: /etc/bind
+    bind_user: bind
+    bind_group: bind
+    bind_service_name: bind9
+    bind_pkgs:
+      - bind9
+      - dnsutils
+  vars_files:
+    - secrets.yml
+
+  tasks:
+ 
+    - name: update all packages
+      yum: name=* state=latest
+      sudo: true               
+
+
+    - name: install bind packages
+      yum: pkg={{ item }} state={{ bind_pkg_state }}
+      with_items: bind_pkgs
+
+    - name: setup zone directories
+      file: dest={{ bind_base_zones_path }}/{{ item }} state=directory owner={{ bind_user }} group={{ bind_group }} mode=0755
+      with_items:
+        - masters
+        - slaves
+
+    - name: setup zones
+      template: src=named.conf.local.{{ item }}.j2 dest={{ bind_config_basepath }}/named.conf.local.{{ item }} owner={{ bind_user }} group={{ bind_group }} mode=0600
+      with_items:
+        - master
+        - slave
+        - forward
+      notify: reload bind
+
+    - name: configure bind
+      copy: src=named.conf dest={{ bind_config_basepath }}/named.conf owner={{ bind_user }} group={{ bind_group }} mode=0600
+      notify: restart bind
+
+    - name: configure bind options
+      template: src=named.conf.options.j2 dest={{ bind_config_basepath }}/named.conf.options owner={{ bind_user }} group={{ bind_group }} mode=0600
+      notify: restart bind
+
+    - name: Copy master zone files
+      copy: src={{ bind_masterzones_path }}/db.{{ item.name }} dest={{ bind_base_zones_path }}/{{bind_masterzones_path}} owner={{ bind_user }} group={{ bind_group }}
+      with_items: bind_config_master_zones
+      notify: reload bind
+      tags: bind-zones
+
+    - name: start/stop bind service
+      service: name={{ bind_service_name }} state={{ bind_service_state }} enabled={{ bind_service_enabled }}
+
